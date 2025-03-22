@@ -1,6 +1,8 @@
 import os
 import logging
 import tempfile
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import torch
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
@@ -13,13 +15,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configure your Telegram bot token
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Hardcode your token (only for troubleshooting - normally use environment variables)
+TELEGRAM_TOKEN = "7642881098:AAFGbpNoK8vjo3dnv7UVI4_KvVRGV3zH9jc"
 
 # Global variables for the transcription model
 transcription_pipe = None
 device = "cpu"
 torch_dtype = torch.float32
+
+# Simple HTTP server to satisfy Cloud Run requirements
+def start_http_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'KB-Whisper Bot is running!')
+    
+    httpd = HTTPServer(('', 8080), Handler)
+    print("Starting HTTP server on port 8080")
+    httpd.serve_forever()
 
 def setup_model():
     """Setup the transcription model at startup."""
@@ -257,6 +272,10 @@ def error_handler(update, context):
 
 def main() -> None:
     """Start the bot."""
+    # Start HTTP server in a thread to satisfy Cloud Run
+    http_thread = threading.Thread(target=start_http_server, daemon=True)
+    http_thread.start()
+    
     # Create the Updater and pass it the bot's token
     updater = Updater(TELEGRAM_TOKEN)
     
@@ -281,6 +300,7 @@ def main() -> None:
     
     # Start the Bot
     updater.start_polling()
+    print("Bot started successfully!")
     
     # Run the bot until you press Ctrl-C
     updater.idle()
