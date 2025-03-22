@@ -32,8 +32,10 @@ def start_http_server():
             self.end_headers()
             self.wfile.write(b'KB-Whisper Bot is running!')
     
-    httpd = HTTPServer(('', 8080), Handler)
-    print("Starting HTTP server on port 8080")
+    # Get port from environment variable
+    port = int(os.environ.get('PORT', '8080'))
+    httpd = HTTPServer(('0.0.0.0', port), Handler)
+    print(f"Starting HTTP server on port {port}")
     httpd.serve_forever()
 
 def setup_model():
@@ -270,11 +272,11 @@ def error_handler(update, context):
     """Handle errors."""
     logger.error(f"Update {update} caused error {context.error}")
 
-def main() -> None:
-    """Start the bot."""
+def main():
     # Start HTTP server in a thread to satisfy Cloud Run
     http_thread = threading.Thread(target=start_http_server, daemon=True)
     http_thread.start()
+    print("HTTP server thread started")
     
     # Create the Updater and pass it the bot's token
     updater = Updater(TELEGRAM_TOKEN)
