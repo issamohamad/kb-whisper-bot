@@ -21,5 +21,8 @@ COPY . .
 # Print directory contents for debugging
 RUN ls -la
 
+# Expose the port that the application listens on
+EXPOSE 8080
+
 # Command to run the application
 CMD ["python", "main.py"]
