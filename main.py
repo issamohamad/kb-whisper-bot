@@ -1,13 +1,17 @@
 import os
+import sys
 import logging
 import tempfile
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import torch
+from flask import Flask
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from pydub import AudioSegment
+
+# Create Flask app
+app = Flask(__name__)
 
 # Enable logging
 logging.basicConfig(
@@ -15,33 +19,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Hardcode your token (only for troubleshooting - normally use environment variables)
+# Print debug information at startup
+print("Starting application...")
+print(f"Python version: {sys.version}")
+print(f"Environment PORT variable: {os.environ.get('PORT', 'not set')}")
+
+# Hardcode your token
 TELEGRAM_TOKEN = "7642881098:AAFGbpNoK8vjo3dnv7UVI4_KvVRGV3zH9jc"
 
 # Global variables for the transcription model
 transcription_pipe = None
 device = "cpu"
 torch_dtype = torch.float32
+model_loaded = False
 
-# Simple HTTP server to satisfy Cloud Run requirements
-def start_http_server():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'KB-Whisper Bot is running!')
-    
-    httpd = HTTPServer(('', 8080), Handler)
-    print("Starting HTTP server on port 8080")
-    httpd.serve_forever()
+# Add Flask route for health check
+@app.route('/')
+def hello_world():
+    global model_loaded
+    status = "Model loaded and ready" if model_loaded else "Model loading in progress"
+    return f'KB-Whisper Bot is running! Status: {status}'
 
 def setup_model():
     """Setup the transcription model at startup."""
-    global transcription_pipe, device, torch_dtype
+    global transcription_pipe, device, torch_dtype, model_loaded
     
     if transcription_pipe is not None:
         return
+    
+    print("Starting model setup...")
     
     # Determine the device to use
     if torch.cuda.is_available():
@@ -49,25 +55,35 @@ def setup_model():
         torch_dtype = torch.float16
     
     logger.info(f"Setting up KB-Whisper model on {device}...")
+    print(f"Setting up KB-Whisper model on {device}...")
     
-    # Load model
-    model_id = "KBLab/kb-whisper-small"  # Use small model for faster inference
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=torch_dtype, use_safetensors=True
-    )
-    model.to(device)
-    processor = AutoProcessor.from_pretrained(model_id)
-    
-    transcription_pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model,
-        tokenizer=processor.tokenizer,
-        feature_extractor=processor.feature_extractor,
-        torch_dtype=torch_dtype,
-        device=device if device != "cpu" else -1,
-    )
-    
-    logger.info("KB-Whisper model loaded successfully!")
+    try:
+        # Load model
+        model_id = "KBLab/kb-whisper-small"  # Use small model for faster inference
+        print(f"Loading model: {model_id}")
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id, torch_dtype=torch_dtype, use_safetensors=True
+        )
+        model.to(device)
+        processor = AutoProcessor.from_pretrained(model_id)
+        
+        transcription_pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            torch_dtype=torch_dtype,
+            device=device if device != "cpu" else -1,
+        )
+        
+        logger.info("KB-Whisper model loaded successfully!")
+        print("KB-Whisper model loaded successfully!")
+        model_loaded = True
+        return True
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        print(f"Error loading model: {e}")
+        return False
 
 def start(update: Update, context: CallbackContext) -> None:
     """Send a message when the command /start is issued."""
@@ -127,7 +143,7 @@ def set_language(update: Update, context: CallbackContext) -> None:
 
 def info(update: Update, context: CallbackContext) -> None:
     """Show information about the bot."""
-    global device
+    global device, model_loaded
     
     user_language = context.user_data.get("language", "sv")
     language_names = {
@@ -138,18 +154,23 @@ def info(update: Update, context: CallbackContext) -> None:
         "fi": "Finnish"
     }
     
+    model_status = "Loaded and ready" if model_loaded else "Still loading"
+    
     update.message.reply_text(
         f"KB-Whisper Transcription Bot\n\n"
         f"Model: KBLab/kb-whisper-small\n"
         f"Device: {device}\n"
+        f"Model status: {model_status}\n"
         f"Current language: {language_names[user_language]} ({user_language})\n\n"
         f"Created with ❤️ using KB-Whisper from KBLab"
     )
 
 def process_audio(update: Update, context: CallbackContext) -> None:
     """Process audio messages and files."""
+    global model_loaded
+    
     # Check if model is loaded
-    if transcription_pipe is None:
+    if not model_loaded or transcription_pipe is None:
         update.message.reply_text("I'm still loading the transcription model. Please try again in a moment.")
         return
     
@@ -270,40 +291,53 @@ def error_handler(update, context):
     """Handle errors."""
     logger.error(f"Update {update} caused error {context.error}")
 
-def main() -> None:
-    """Start the bot."""
-    # Start HTTP server in a thread to satisfy Cloud Run
-    http_thread = threading.Thread(target=start_http_server, daemon=True)
-    http_thread.start()
-    
+def setup_telegram_bot():
+    """Set up and start the Telegram bot."""
     # Create the Updater and pass it the bot's token
-    updater = Updater(TELEGRAM_TOKEN)
+    try:
+        print(f"Setting up Telegram bot with token: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
+        updater = Updater(TELEGRAM_TOKEN)
+        
+        # Get the dispatcher to register handlers
+        dispatcher = updater.dispatcher
+        
+        # Add conversation handlers
+        dispatcher.add_handler(CommandHandler("start", start))
+        dispatcher.add_handler(CommandHandler("help", help_command))
+        dispatcher.add_handler(CommandHandler("language", set_language))
+        dispatcher.add_handler(CommandHandler("info", info))
+        
+        # Add message handlers for audio files
+        audio_filter = Filters.audio | Filters.voice | Filters.document.audio | Filters.document.category("audio")
+        dispatcher.add_handler(MessageHandler(audio_filter, process_audio))
+        
+        # Add error handler
+        dispatcher.add_error_handler(error_handler)
+        
+        # Start the Bot
+        updater.start_polling()
+        print("Telegram bot started successfully!")
+        
+        # Run the bot until you press Ctrl-C
+        updater.idle()
+    except Exception as e:
+        print(f"Error starting Telegram bot: {e}")
+        import traceback
+        traceback.print_exc()
+
+def main():
+    # Start the Telegram bot in a separate thread
+    bot_thread = threading.Thread(target=setup_telegram_bot, daemon=True)
+    bot_thread.start()
     
-    # Get the dispatcher to register handlers
-    dispatcher = updater.dispatcher
+    # Start model setup in a separate thread
+    model_thread = threading.Thread(target=setup_model, daemon=True)
+    model_thread.start()
     
-    # Add conversation handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("language", set_language))
-    dispatcher.add_handler(CommandHandler("info", info))
-    
-    # Add message handlers for audio files
-    audio_filter = Filters.audio | Filters.voice | Filters.document.audio | Filters.document.category("audio")
-    dispatcher.add_handler(MessageHandler(audio_filter, process_audio))
-    
-    # Add error handler
-    dispatcher.add_error_handler(error_handler)
-    
-    # Setup the model before starting
-    setup_model()
-    
-    # Start the Bot
-    updater.start_polling()
-    print("Bot started successfully!")
-    
-    # Run the bot until you press Ctrl-C
-    updater.idle()
+    # Start Flask app in the main thread
+    port = int(os.environ.get('PORT', 8080))
+    print(f"Starting Flask server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 if __name__ == '__main__':
     main()
