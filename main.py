@@ -24,8 +24,10 @@ print("Starting application...")
 print(f"Python version: {sys.version}")
 print(f"Environment PORT variable: {os.environ.get('PORT', 'not set')}")
 
-# Hardcode your token
-TELEGRAM_TOKEN = "7642881098:AAFGbpNoK8vjo3dnv7UVI4_KvVRGV3zH9jc"
+# Get Telegram token from environment variable (with fallback for local testing)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "7642881098:AAFGbpNoK8vjo3dnv7UVI4_KvVRGV3zH9jc")
+if not TELEGRAM_TOKEN:
+    raise ValueError("No Telegram token provided!")
 
 # Global variables for the transcription model
 transcription_pipe = None
@@ -33,7 +35,7 @@ device = "cpu"
 torch_dtype = torch.float32
 model_loaded = False
 
-# Add Flask route for health check
+# Flask health check endpoint
 @app.route('/')
 def hello_world():
     global model_loaded
@@ -43,20 +45,20 @@ def hello_world():
 def setup_model():
     """Setup the transcription model at startup."""
     global transcription_pipe, device, torch_dtype, model_loaded
-    
+
     if transcription_pipe is not None:
         return
-    
+
     print("Starting model setup...")
-    
+
     # Determine the device to use
     if torch.cuda.is_available():
         device = "cuda:0"
         torch_dtype = torch.float16
-    
+
     logger.info(f"Setting up KB-Whisper model on {device}...")
     print(f"Setting up KB-Whisper model on {device}...")
-    
+
     try:
         # Load model
         model_id = "KBLab/kb-whisper-small"  # Use small model for faster inference
@@ -66,7 +68,7 @@ def setup_model():
         )
         model.to(device)
         processor = AutoProcessor.from_pretrained(model_id)
-        
+
         transcription_pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
@@ -75,7 +77,7 @@ def setup_model():
             torch_dtype=torch_dtype,
             device=device if device != "cpu" else -1,
         )
-        
+
         logger.info("KB-Whisper model loaded successfully!")
         print("KB-Whisper model loaded successfully!")
         model_loaded = True
@@ -115,19 +117,19 @@ def set_language(update: Update, context: CallbackContext) -> None:
             "Example: /language en"
         )
         return
-    
+
     language = context.args[0].lower()
     valid_languages = {"sv", "en", "no", "da", "fi"}
-    
+
     if language not in valid_languages:
         update.message.reply_text(
             f"Invalid language code. Please use one of: {', '.join(valid_languages)}"
         )
         return
-    
+
     # Store in user_data to remember for this user
     context.user_data["language"] = language
-    
+
     language_names = {
         "sv": "Swedish",
         "en": "English",
@@ -135,7 +137,7 @@ def set_language(update: Update, context: CallbackContext) -> None:
         "da": "Danish",
         "fi": "Finnish"
     }
-    
+
     update.message.reply_text(
         f"Language set to {language_names[language]} ({language})."
     )
@@ -144,7 +146,7 @@ def set_language(update: Update, context: CallbackContext) -> None:
 def info(update: Update, context: CallbackContext) -> None:
     """Show information about the bot."""
     global device, model_loaded
-    
+
     user_language = context.user_data.get("language", "sv")
     language_names = {
         "sv": "Swedish",
@@ -153,9 +155,9 @@ def info(update: Update, context: CallbackContext) -> None:
         "da": "Danish",
         "fi": "Finnish"
     }
-    
+
     model_status = "Loaded and ready" if model_loaded else "Still loading"
-    
+
     update.message.reply_text(
         f"KB-Whisper Transcription Bot\n\n"
         f"Model: KBLab/kb-whisper-small\n"
@@ -168,24 +170,24 @@ def info(update: Update, context: CallbackContext) -> None:
 def process_audio(update: Update, context: CallbackContext) -> None:
     """Process audio messages and files."""
     global model_loaded
-    
+
     # Check if model is loaded
     if not model_loaded or transcription_pipe is None:
         update.message.reply_text("I'm still loading the transcription model. Please try again in a moment.")
         return
-    
+
     # Get user language preference or default to Swedish
     language = context.user_data.get("language", "sv")
-    
-    # Tell the user we're processing
+
+    # Inform user that processing is starting
     processing_message = update.message.reply_text(
         f"Processing your audio in {language} language...\n"
         f"This may take a while depending on the audio length."
     )
-    
+
     user = update.effective_user
     logger.info(f"User {user.id} ({user.first_name}) sent an audio file")
-    
+
     # Get the audio file
     try:
         if update.message.voice:
@@ -204,17 +206,17 @@ def process_audio(update: Update, context: CallbackContext) -> None:
             file_extension = os.path.splitext(update.message.document.file_name)[1]
             duration = 0  # Unknown duration for documents
             file_info = update.message.document.file_name
-        
+
         logger.info(f"Received file: {file_info}")
-        
+
         # Create a temporary file
         with tempfile.NamedTemporaryFile(suffix=file_extension, delete=False) as temp_file:
             temp_path = temp_file.name
-        
+
         # Download the file
         file.download(temp_path)
-        
-        # Process audio to WAV if needed
+
+        # Convert audio to WAV if needed
         wav_path = temp_path
         if file_extension.lower() not in ['.wav']:
             try:
@@ -226,16 +228,16 @@ def process_audio(update: Update, context: CallbackContext) -> None:
                 processing_message.edit_text(f"Error processing audio: {str(e)}")
                 os.unlink(temp_path)
                 return
-        
+
         # Estimate processing time
         processing_time = (duration or os.path.getsize(wav_path) / 100000) * (1 if device == "cuda:0" else 5)
-        
+
         # Update the processing message with estimated time
         processing_message.edit_text(
             f"Processing your audio in {language} language...\n"
             f"Estimated time: {int(processing_time)} seconds"
         )
-        
+
         # Transcribe the audio
         try:
             result = transcription_pipe(
@@ -249,7 +251,7 @@ def process_audio(update: Update, context: CallbackContext) -> None:
                     "return_timestamps": True
                 }
             )
-            
+
             # Format the output with timestamps
             formatted_output = ""
             if "chunks" in result:
@@ -260,29 +262,27 @@ def process_audio(update: Update, context: CallbackContext) -> None:
                     formatted_output += f"{timestamp} {chunk['text']}\n\n"
             else:
                 formatted_output = result["text"]
-            
-            # Split the message if it's too long for Telegram
+
+            # Send transcription in one or multiple messages if needed
             if len(formatted_output) <= 4000:
                 processing_message.edit_text(formatted_output)
             else:
                 processing_message.edit_text("Transcription complete! Sending in multiple messages due to length...")
-                
-                # Split and send in chunks of 4000 characters
                 for i in range(0, len(formatted_output), 4000):
                     chunk = formatted_output[i:i+4000]
                     update.message.reply_text(chunk)
-            
+
             logger.info(f"Transcription sent to user {user.id}")
-            
+
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             processing_message.edit_text(f"Error during transcription: {str(e)}")
-        
-        # Clean up
+
+        # Clean up temporary files
         os.unlink(temp_path)
         if wav_path != temp_path and os.path.exists(wav_path):
             os.unlink(wav_path)
-            
+
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         processing_message.edit_text(f"Error: {str(e)}")
@@ -293,32 +293,32 @@ def error_handler(update, context):
 
 def setup_telegram_bot():
     """Set up and start the Telegram bot."""
-    # Create the Updater and pass it the bot's token
     try:
         print(f"Setting up Telegram bot with token: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
-        updater = Updater(TELEGRAM_TOKEN)
-        
+        # Explicitly pass the token as a keyword argument
+        updater = Updater(token=TELEGRAM_TOKEN)
+
         # Get the dispatcher to register handlers
         dispatcher = updater.dispatcher
-        
-        # Add conversation handlers
+
+        # Add command handlers
         dispatcher.add_handler(CommandHandler("start", start))
         dispatcher.add_handler(CommandHandler("help", help_command))
         dispatcher.add_handler(CommandHandler("language", set_language))
         dispatcher.add_handler(CommandHandler("info", info))
-        
-        # Add message handlers for audio files
+
+        # Add message handler for audio files
         audio_filter = Filters.audio | Filters.voice | Filters.document.audio | Filters.document.category("audio")
         dispatcher.add_handler(MessageHandler(audio_filter, process_audio))
-        
+
         # Add error handler
         dispatcher.add_error_handler(error_handler)
-        
-        # Start the Bot
+
+        # Start the bot
         updater.start_polling()
         print("Telegram bot started successfully!")
-        
-        # Run the bot until you press Ctrl-C
+
+        # Run the bot until interruption
         updater.idle()
     except Exception as e:
         print(f"Error starting Telegram bot: {e}")
@@ -329,12 +329,12 @@ def main():
     # Start the Telegram bot in a separate thread
     bot_thread = threading.Thread(target=setup_telegram_bot, daemon=True)
     bot_thread.start()
-    
+
     # Start model setup in a separate thread
     model_thread = threading.Thread(target=setup_model, daemon=True)
     model_thread.start()
-    
-    # Start Flask app in the main thread
+
+    # Start Flask app in the main thread, listening on the expected port
     port = int(os.environ.get('PORT', 8080))
     print(f"Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
