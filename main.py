@@ -10,7 +10,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from pydub import AudioSegment
 
-# Create Flask app
+# Create Flask app for health checks
 app = Flask(__name__)
 
 # Enable logging
@@ -19,17 +19,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Print debug information at startup
+# Print startup debug information
 print("Starting application...")
 print(f"Python version: {sys.version}")
 print(f"Environment PORT variable: {os.environ.get('PORT', 'not set')}")
 
-# Get Telegram token from environment variable (with fallback for local testing)
+# Get Telegram token from environment (with fallback for local testing)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "7642881098:AAFGbpNoK8vjo3dnv7UVI4_KvVRGV3zH9jc")
 if not TELEGRAM_TOKEN:
     raise ValueError("No Telegram token provided!")
 else:
-    # For security, only show the first and last 5 characters
+    # Only print a masked version of the token
     print(f"Telegram token loaded: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
 
 # Global variables for the transcription model
@@ -38,39 +38,34 @@ device = "cpu"
 torch_dtype = torch.float32
 model_loaded = False
 
-# Flask health check endpoint
+# Flask endpoint for health checks
 @app.route('/')
 def hello_world():
     status = "Model loaded and ready" if model_loaded else "Model loading in progress"
     return f'KB-Whisper Bot is running! Status: {status}'
 
 def setup_model():
-    """Setup the transcription model at startup."""
+    """Load the transcription model in a background thread to avoid blocking startup."""
     global transcription_pipe, device, torch_dtype, model_loaded
 
     if transcription_pipe is not None:
         return
 
     print("Starting model setup...")
-
-    # Determine the device to use
     if torch.cuda.is_available():
         device = "cuda:0"
         torch_dtype = torch.float16
 
     logger.info(f"Setting up KB-Whisper model on {device}...")
     print(f"Setting up KB-Whisper model on {device}...")
-
     try:
-        # Load model
-        model_id = "KBLab/kb-whisper-small"  # Use small model for faster inference
+        model_id = "KBLab/kb-whisper-small"  # Use a smaller model for faster inference
         print(f"Loading model: {model_id}")
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id, torch_dtype=torch_dtype, use_safetensors=True
         )
         model.to(device)
         processor = AutoProcessor.from_pretrained(model_id)
-
         transcription_pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
@@ -79,18 +74,15 @@ def setup_model():
             torch_dtype=torch_dtype,
             device=device if device != "cpu" else -1,
         )
-
         logger.info("KB-Whisper model loaded successfully!")
         print("KB-Whisper model loaded successfully!")
         model_loaded = True
-        return True
     except Exception as e:
         logger.error(f"Error loading model: {e}")
         print(f"Error loading model: {e}")
-        return False
 
 def start(update: Update, context: CallbackContext) -> None:
-    """Send a message when the command /start is issued."""
+    """Handle /start command from users."""
     user = update.effective_user
     update.message.reply_text(
         f"Hi {user.first_name}! I'm a transcription bot using KB-Whisper.\n"
@@ -101,60 +93,39 @@ def start(update: Update, context: CallbackContext) -> None:
     logger.info(f"User {user.id} ({user.first_name}) started the bot")
 
 def help_command(update: Update, context: CallbackContext) -> None:
-    """Send a message when the command /help is issued."""
+    """Handle /help command."""
     update.message.reply_text(
         "Send me an audio message or file to transcribe it.\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
-        "/help - Show this help message\n"
+        "/help - Show help message\n"
         "/language [code] - Change language (sv, en, no, da, fi)\n"
         "/info - Show bot information"
     )
 
 def set_language(update: Update, context: CallbackContext) -> None:
-    """Set the language for transcription."""
+    """Set the transcription language."""
     if not context.args:
         update.message.reply_text(
-            "Please specify a language code: sv, en, no, da, fi\n"
-            "Example: /language en"
+            "Please specify a language code: sv, en, no, da, fi\nExample: /language en"
         )
         return
-
     language = context.args[0].lower()
     valid_languages = {"sv", "en", "no", "da", "fi"}
-
     if language not in valid_languages:
         update.message.reply_text(
-            f"Invalid language code. Please use one of: {', '.join(valid_languages)}"
+            f"Invalid language code. Valid codes are: {', '.join(valid_languages)}"
         )
         return
-
-    # Store in user_data to remember for this user
     context.user_data["language"] = language
-
-    language_names = {
-        "sv": "Swedish",
-        "en": "English",
-        "no": "Norwegian",
-        "da": "Danish",
-        "fi": "Finnish"
-    }
-
-    update.message.reply_text(
-        f"Language set to {language_names[language]} ({language})."
-    )
+    language_names = {"sv": "Swedish", "en": "English", "no": "Norwegian", "da": "Danish", "fi": "Finnish"}
+    update.message.reply_text(f"Language set to {language_names[language]} ({language}).")
     logger.info(f"User {update.effective_user.id} changed language to {language}")
 
 def info(update: Update, context: CallbackContext) -> None:
-    """Show information about the bot."""
+    """Display bot information."""
     user_language = context.user_data.get("language", "sv")
-    language_names = {
-        "sv": "Swedish",
-        "en": "English",
-        "no": "Norwegian",
-        "da": "Danish",
-        "fi": "Finnish"
-    }
+    language_names = {"sv": "Swedish", "en": "English", "no": "Norwegian", "da": "Danish", "fi": "Finnish"}
     model_status = "Loaded and ready" if model_loaded else "Still loading"
     update.message.reply_text(
         f"KB-Whisper Transcription Bot\n\n"
@@ -166,21 +137,17 @@ def info(update: Update, context: CallbackContext) -> None:
     )
 
 def process_audio(update: Update, context: CallbackContext) -> None:
-    """Process audio messages and files."""
+    """Handle incoming audio files and perform transcription."""
     global model_loaded
-
     if not model_loaded or transcription_pipe is None:
         update.message.reply_text("I'm still loading the transcription model. Please try again in a moment.")
         return
-
     language = context.user_data.get("language", "sv")
     processing_message = update.message.reply_text(
-        f"Processing your audio in {language} language...\n"
-        f"This may take a while depending on the audio length."
+        f"Processing your audio in {language} language... This may take a moment."
     )
     user = update.effective_user
-    logger.info(f"User {user.id} ({user.first_name}) sent an audio file")
-
+    logger.info(f"User {user.id} sent an audio file")
     try:
         if update.message.voice:
             file = update.message.voice.get_file()
@@ -215,23 +182,14 @@ def process_audio(update: Update, context: CallbackContext) -> None:
                 os.unlink(temp_path)
                 return
 
-        processing_time = (duration or os.path.getsize(wav_path) / 100000) * (1 if device == "cuda:0" else 5)
-        processing_message.edit_text(
-            f"Processing your audio in {language} language...\n"
-            f"Estimated time: {int(processing_time)} seconds"
-        )
-
+        processing_message.edit_text(f"Processing your audio in {language} language...")
         try:
             result = transcription_pipe(
                 wav_path,
                 chunk_length_s=30,
                 stride_length_s=3,
                 return_timestamps=True,
-                generate_kwargs={
-                    "task": "transcribe",
-                    "language": language,
-                    "return_timestamps": True
-                }
+                generate_kwargs={"task": "transcribe", "language": language, "return_timestamps": True}
             )
             formatted_output = ""
             if "chunks" in result:
@@ -249,12 +207,10 @@ def process_audio(update: Update, context: CallbackContext) -> None:
                 processing_message.edit_text("Transcription complete! Sending in multiple messages due to length...")
                 for i in range(0, len(formatted_output), 4000):
                     update.message.reply_text(formatted_output[i:i+4000])
-
             logger.info(f"Transcription sent to user {user.id}")
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             processing_message.edit_text(f"Error during transcription: {str(e)}")
-
         os.unlink(temp_path)
         if wav_path != temp_path and os.path.exists(wav_path):
             os.unlink(wav_path)
@@ -263,25 +219,21 @@ def process_audio(update: Update, context: CallbackContext) -> None:
         processing_message.edit_text(f"Error: {str(e)}")
 
 def error_handler(update, context):
-    """Handle errors."""
+    """Log errors."""
     logger.error(f"Update {update} caused error {context.error}")
 
 def setup_telegram_bot():
-    """Set up and start the Telegram bot."""
+    """Initialize and start the Telegram bot in a background thread."""
     try:
         print(f"Setting up Telegram bot with token: {TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}")
-        # Explicitly pass the token using a keyword argument, ensuring it's not empty
         updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
         dispatcher = updater.dispatcher
-
         dispatcher.add_handler(CommandHandler("start", start))
         dispatcher.add_handler(CommandHandler("help", help_command))
         dispatcher.add_handler(CommandHandler("language", set_language))
         dispatcher.add_handler(CommandHandler("info", info))
-
         audio_filter = Filters.audio | Filters.voice | Filters.document.audio | Filters.document.category("audio")
         dispatcher.add_handler(MessageHandler(audio_filter, process_audio))
-
         dispatcher.add_error_handler(error_handler)
         updater.start_polling()
         print("Telegram bot started successfully!")
@@ -292,12 +244,10 @@ def setup_telegram_bot():
         traceback.print_exc()
 
 def main():
-    bot_thread = threading.Thread(target=setup_telegram_bot, daemon=True)
-    bot_thread.start()
-
-    model_thread = threading.Thread(target=setup_model, daemon=True)
-    model_thread.start()
-
+    # Start Telegram bot and model loading in background threads so they don't block the Flask server.
+    threading.Thread(target=setup_telegram_bot, daemon=True).start()
+    threading.Thread(target=setup_model, daemon=True).start()
+    # Bind Flask to the port specified by the environment (default 8080)
     port = int(os.environ.get('PORT', 8080))
     print(f"Starting Flask server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
