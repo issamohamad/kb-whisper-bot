@@ -62,13 +62,17 @@ def setup_model():
         )
         model.to(device)
         processor = AutoProcessor.from_pretrained(model_id)
+        # `pipeline` expects an integer device index (0 for first GPU, -1 for
+        # CPU). When running on GPU ``device`` is the string ``"cuda:0"`` so we
+        # need to convert it to ``0`` to avoid a type error.
+        pipeline_device = 0 if device != "cpu" else -1
         transcription_pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
             tokenizer=processor.tokenizer,
             feature_extractor=processor.feature_extractor,
             torch_dtype=torch_dtype,
-            device=device if device != "cpu" else -1,
+            device=pipeline_device,
         )
         logger.info("KB-Whisper model loaded successfully!")
         print("KB-Whisper model loaded successfully!")
